@@ -30,6 +30,9 @@ ipch
 *.VC.db
 *.VC.VC.opendb
 
+## Commonly used CMake directories
+/build*/
+
 ## Xcode artifacts
 project.xcworkspace
 xcuserdata
