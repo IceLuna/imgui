@@ -16,10 +16,15 @@ examples/*/Release/*
 examples/*/x64/*
 examples/*.tmp
 
+bin/
+bin-int/
+
 ## Visual Studio artifacts
 .vs
 ipch
 *.opensdf
+*.vcxproj
+*.vcxproj.filters
 *.log
 *.pdb
 *.ilk
