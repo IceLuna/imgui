@@ -31,8 +31,8 @@ project "ImGui"
 
     filter { "system:windows", "configurations:Release" }
         runtime "Release"
-        optimize "On"
+        optimize "Speed"
 
     filter { "system:windows", "configurations:Dist" }
         runtime "Release"
-        optimize "On"
+        optimize "Speed"
