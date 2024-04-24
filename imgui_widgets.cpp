@@ -1212,6 +1212,54 @@ bool ImGui::ImageButtonEx(ImGuiID id, ImTextureRef tex_ref, const ImVec2& image_
     return pressed;
 }
 
+// ImageButton() is flawed as 'id' is always derived from 'texture_id' (see #2464 #1390)
+// We provide this internal helper to write your own variant while we figure out how to redesign the public ImageButton() API.
+bool ImGui::ImageButtonRotatedEx(ImGuiID id, ImTextureID texture_id, const ImVec2& image_size, float angle_rad, const ImVec2& uv0, const ImVec2& uv1, const ImVec4& bg_col, const ImVec4& tint_col, ImGuiButtonFlags flags)
+{
+    ImGuiContext& g = *GImGui;
+    ImGuiWindow* window = GetCurrentWindow();
+    if (window->SkipItems)
+        return false;
+
+    const ImVec2 padding = g.Style.FramePadding;
+    const ImRect bb(window->DC.CursorPos, window->DC.CursorPos + image_size + padding * 2.0f);
+    ItemSize(bb);
+    if (!ItemAdd(bb, id))
+        return false;
+
+    bool hovered, held;
+    bool pressed = ButtonBehavior(bb, id, &hovered, &held, flags);
+
+    // Render
+    const ImU32 col = GetColorU32((held && hovered) ? ImGuiCol_ButtonActive : hovered ? ImGuiCol_ButtonHovered : ImGuiCol_Button);
+    RenderNavHighlight(bb, id);
+    RenderFrame(bb.Min, bb.Max, col, true, ImClamp((float)ImMin(padding.x, padding.y), 0.0f, g.Style.FrameRounding));
+    if (bg_col.w > 0.0f)
+        window->DrawList->AddRectFilled(bb.Min + padding, bb.Max - padding, GetColorU32(bg_col));
+
+    float cos_a = cosf(angle_rad);
+    float sin_a = sinf(angle_rad);
+    ImVec2 center = (bb.Min + bb.Max) * 0.5f;
+    ImVec2 pos[4] =
+    {
+        center + ImRotate(ImVec2(-image_size.x * 0.5f, -image_size.y * 0.5f), cos_a, sin_a),
+        center + ImRotate(ImVec2(+image_size.x * 0.5f, -image_size.y * 0.5f), cos_a, sin_a),
+        center + ImRotate(ImVec2(+image_size.x * 0.5f, +image_size.y * 0.5f), cos_a, sin_a),
+        center + ImRotate(ImVec2(-image_size.x * 0.5f, +image_size.y * 0.5f), cos_a, sin_a)
+    };
+    ImVec2 uvs[4] =
+    {
+        uv0,
+        ImVec2(uv1.x, uv0.y),
+        uv1,
+        ImVec2(uv0.x, uv1.y)
+    };
+
+    window->DrawList->AddImageQuad(texture_id, pos[0], pos[1], pos[2], pos[3], uvs[0], uvs[1], uvs[2], uvs[3], GetColorU32(tint_col));
+
+    return pressed;
+}
+
 // - ImageButton() adds style.FramePadding*2.0f to provided size. This is in order to facilitate fitting an image in a button.
 // - ImageButton() draws a background based on regular Button() color + optionally an inner background if specified. (#8165) // FIXME: Maybe that's not the best design?
 bool ImGui::ImageButton(const char* str_id, ImTextureRef tex_ref, const ImVec2& image_size, const ImVec2& uv0, const ImVec2& uv1, const ImVec4& bg_col, const ImVec4& tint_col)
