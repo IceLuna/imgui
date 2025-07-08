@@ -29,10 +29,10 @@ project "ImGui"
     filter { "system:windows", "configurations:Debug" }
         runtime "Debug"
 
-    filter { "system:windows", "configurations:Release" }
+    filter { "system:windows", "configurations:ReleaseWithDebug" }
         runtime "Release"
         optimize "Speed"
 
-    filter { "system:windows", "configurations:Dist" }
+    filter { "system:windows", "configurations:Release" }
         runtime "Release"
         optimize "Speed"
