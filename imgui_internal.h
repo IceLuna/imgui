@@ -2877,6 +2877,9 @@ struct ImGuiContext
     ImVector<char>          TempBuffer;                         // Temporary text buffer
     char                    TempKeychordName[64];
 
+    // Eagle
+    bool                    DisablePopupPosClamp = false;       // Needed to fix popups being rendered in the wrong position when using them within the node editor
+
     ImGuiContext(ImFontAtlas* shared_font_atlas);
     ~ImGuiContext();
 };
