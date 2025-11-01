@@ -11862,6 +11862,9 @@ void    ImGui::ErrorRecoveryTryToRecoverWindowState(const ImGuiErrorRecoveryStat
         PopFocusScope();
     }
     //IM_ASSERT(g.FocusScopeStack.Size == state_in->SizeOfFocusScopeStack);
+
+    IM_ASSERT(0 == window->DC.LayoutStack.Size && (!window->DC.LayoutStack.Size || window->DC.LayoutStack.back()->Type == ImGuiLayoutType_Horizontal) && "BeginHorizontal/EndHorizontal Mismatch!");
+    IM_ASSERT(0 == window->DC.LayoutStack.Size && (!window->DC.LayoutStack.Size || window->DC.LayoutStack.back()->Type == ImGuiLayoutType_Vertical) && "BeginVertical/EndVertical Mismatch!");
 }
 
 bool    ImGui::ErrorLog(const char* msg)
