@@ -1886,20 +1886,18 @@ bool ImGui::SplitterBehavior(const ImRect& bb, ImGuiID id, ImGuiAxis axis, float
     if (held)
     {
         float mouse_delta = (g.IO.MousePos - g.ActiveIdClickOffset - bb_interact.Min)[axis];
+        float* size = axis == ImGuiAxis_X ? size1 : size2;
+        const float min_size = axis == ImGuiAxis_X ? min_size1 : min_size2;
 
         // Minimum pane size
-        float size_1_maximum_delta = ImMax(0.0f, *size1 - min_size1);
-        float size_2_maximum_delta = ImMax(0.0f, *size2 - min_size2);
-        if (mouse_delta < -size_1_maximum_delta)
-            mouse_delta = -size_1_maximum_delta;
-        if (mouse_delta > size_2_maximum_delta)
-            mouse_delta = size_2_maximum_delta;
+        float size_maximum_delta = ImMax(0.0f, *size - min_size);
+        if (mouse_delta < -size_maximum_delta)
+            mouse_delta = -size_maximum_delta;
 
         // Apply resize
         if (mouse_delta != 0.0f)
         {
-            *size1 = ImMax(*size1 + mouse_delta, min_size1);
-            *size2 = ImMax(*size2 - mouse_delta, min_size2);
+            *size = ImMax(*size + mouse_delta, min_size);
             bb_render.Translate((axis == ImGuiAxis_X) ? ImVec2(mouse_delta, 0.0f) : ImVec2(0.0f, mouse_delta));
             MarkItemEdited(id);
         }
