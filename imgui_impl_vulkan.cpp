@@ -1055,14 +1055,78 @@ void ImGui_ImplVulkan_Shutdown()
     IM_DELETE(bd);
 }
 
+struct TextureData
+{
+    VkSampler Sampler;
+    VkImageView ImageView;
+    VkImageLayout ImageLayout;
+    mutable bool bWasUsedLastFrame = true;
+
+    std::size_t hash() const
+    {
+        std::size_t res = 17;
+        res = res * 31 + std::hash<uint64_t>()(uint64_t(Sampler));
+        res = res * 31 + std::hash<uint64_t>()(uint64_t(ImageView));
+        res = res * 31 + std::hash<uint32_t>()(uint32_t(ImageLayout));
+        return res;
+    }
+
+    bool operator== (const TextureData& other) const
+    {
+        return Sampler == other.Sampler &&
+            ImageView == other.ImageView &&
+            ImageLayout == other.ImageLayout;
+    }
+
+    bool operator!= (const TextureData& other) const
+    {
+        return !(*this == other);
+    }
+};
+
+struct KeyHasher
+{
+    std::size_t operator()(const TextureData& data) const
+    {
+        return data.hash();
+    }
+
+    std::size_t operator()(const VkDescriptorPool data) const
+    {
+        std::size_t res = 17;
+        res = res * 31 + std::hash<uint64_t>()(uint64_t(data));
+        return res;
+    }
+};
+
+using DescriptorTextureData = std::unordered_map<TextureData, VkDescriptorSet, KeyHasher>;
+static std::unordered_map<VkDescriptorPool, DescriptorTextureData, KeyHasher> s_PoolTextures;
+
 void ImGui_ImplVulkan_NewFrame(VkDescriptorPool frameDescriptorPool)
 {
     ImGui_ImplVulkan_Data* bd = ImGui_ImplVulkan_GetBackendData();
     IM_ASSERT(bd != nullptr && "Did you call ImGui_ImplVulkan_Init()?");
     IM_UNUSED(bd);
 
+    auto& textures = s_PoolTextures[frameDescriptorPool]; // Add pool
     bd->VulkanInitInfo.PerFrameDescriptorPool = frameDescriptorPool;
-    vkResetDescriptorPool(bd->VulkanInitInfo.Device, frameDescriptorPool, 0);
+
+    // Reset current frames descriptor sets
+    for (auto it = textures.begin(); it != textures.end();)
+    {
+        if (it->first.bWasUsedLastFrame)
+        {
+            it->first.bWasUsedLastFrame = false; // reset `used` flag
+            ++it;
+        }
+        else
+        {
+            // Delete it since unused
+            vkFreeDescriptorSets(bd->VulkanInitInfo.Device, frameDescriptorPool, 1, &it->second);
+            it = textures.erase(it);
+        }
+    }
+    //vkResetDescriptorPool(bd->VulkanInitInfo.Device, frameDescriptorPool, 0);
 }
 
 void ImGui_ImplVulkan_SetMinImageCount(uint32_t min_image_count)
@@ -1086,12 +1150,25 @@ VkDescriptorSet ImGui_ImplVulkan_AddTexture(VkSampler sampler, VkImageView image
     ImGui_ImplVulkan_Data* bd = ImGui_ImplVulkan_GetBackendData();
     ImGui_ImplVulkan_InitInfo* v = &bd->VulkanInitInfo;
 
+    TextureData textureData{ sampler, image_view, image_layout };
+
+    auto& pool = v->PerFrameDescriptorPool;
+    // Get current pool's textures
+    auto& textures = s_PoolTextures[pool];
+
+    auto& textureIt = textures.find(textureData); // Find texture in the pool
+    if (textureIt != textures.end())
+    {
+        textureIt->first.bWasUsedLastFrame = true;
+        return textureIt->second; // return existing descriptor set
+    }
+
     // Create Descriptor Set:
     VkDescriptorSet descriptor_set;
     {
         VkDescriptorSetAllocateInfo alloc_info = {};
         alloc_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-        alloc_info.descriptorPool = v->PerFrameDescriptorPool;
+        alloc_info.descriptorPool = pool;
         alloc_info.descriptorSetCount = 1;
         alloc_info.pSetLayouts = &bd->DescriptorSetLayout;
         VkResult err = vkAllocateDescriptorSets(v->Device, &alloc_info, &descriptor_set);
@@ -1112,6 +1189,8 @@ VkDescriptorSet ImGui_ImplVulkan_AddTexture(VkSampler sampler, VkImageView image
         write_desc[0].pImageInfo = desc_image;
         vkUpdateDescriptorSets(v->Device, 1, write_desc, 0, nullptr);
     }
+
+    textures[textureData] = descriptor_set;
     return descriptor_set;
 }
 
