@@ -621,6 +621,10 @@ bool ImGui_ImplVulkan_CreateFontsTexture(VkCommandBuffer command_buffer)
 
     VkResult err;
 
+    assert(bd->FontImage == VK_NULL_HANDLE);
+    assert(bd->FontMemory == VK_NULL_HANDLE);
+    assert(bd->FontView == VK_NULL_HANDLE);
+
     // Create the Image:
     {
         VkImageCreateInfo info = {};
@@ -747,6 +751,33 @@ bool ImGui_ImplVulkan_CreateFontsTexture(VkCommandBuffer command_buffer)
     io.Fonts->SetTexID((ImTextureID)bd->FontDescriptorSet);
 
     return true;
+}
+
+void ImGui_ImplVulkan_DestroyFontsTexture()
+{
+    ImGui_ImplVulkan_Data* bd = ImGui_ImplVulkan_GetBackendData();
+    ImGui_ImplVulkan_InitInfo* v = &bd->VulkanInitInfo;
+
+    if (bd->FontView)
+    {
+        vkDestroyImageView(v->Device, bd->FontView, v->Allocator);
+        bd->FontView = VK_NULL_HANDLE;
+    }
+    if (bd->FontImage)
+    {
+        vkDestroyImage(v->Device, bd->FontImage, v->Allocator);
+        bd->FontImage = VK_NULL_HANDLE;
+    }
+    if (bd->FontMemory)
+    {
+        vkFreeMemory(v->Device, bd->FontMemory, v->Allocator);
+        bd->FontMemory = VK_NULL_HANDLE;
+    }
+    if (bd->FontDescriptorSet)
+    {
+        vkFreeDescriptorSets(v->Device, v->DescriptorPool, 1, &bd->FontDescriptorSet);
+        bd->FontDescriptorSet = VK_NULL_HANDLE;
+    }
 }
 
 static void ImGui_ImplVulkan_CreateShaderModules(VkDevice device, const VkAllocationCallbacks* allocator)
