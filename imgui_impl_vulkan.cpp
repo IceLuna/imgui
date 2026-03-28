@@ -1088,25 +1088,33 @@ void ImGui_ImplVulkan_Shutdown()
 
 struct TextureData
 {
-    VkSampler Sampler;
-    VkImageView ImageView;
-    VkImageLayout ImageLayout;
+    VkSampler Sampler = VK_NULL_HANDLE;
+    VkImageView ImageView = VK_NULL_HANDLE;
+    VkImageLayout ImageLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    uint8_t Revision = 0;
     mutable bool bWasUsedLastFrame = true;
+
+    static void hash_combine(std::size_t& seed, std::size_t value)
+    {
+        seed ^= value + 0x9e3779b97f4a7c15ull + (seed << 6) + (seed >> 2);
+    }
 
     std::size_t hash() const
     {
-        std::size_t res = 17;
-        res = res * 31 + std::hash<uint64_t>()(uint64_t(Sampler));
-        res = res * 31 + std::hash<uint64_t>()(uint64_t(ImageView));
-        res = res * 31 + std::hash<uint32_t>()(uint32_t(ImageLayout));
-        return res;
+        std::size_t seed = 0;
+        hash_combine(seed, std::hash<VkSampler>()(Sampler));
+        hash_combine(seed, std::hash<VkImageView>()(ImageView));
+        hash_combine(seed, std::hash<VkImageLayout>()(ImageLayout));
+        hash_combine(seed, std::hash<uint8_t>()(Revision));
+        return seed;
     }
 
     bool operator== (const TextureData& other) const
     {
         return Sampler == other.Sampler &&
             ImageView == other.ImageView &&
-            ImageLayout == other.ImageLayout;
+            ImageLayout == other.ImageLayout &&
+            Revision == other.Revision;
     }
 
     bool operator!= (const TextureData& other) const
@@ -1122,16 +1130,15 @@ struct KeyHasher
         return data.hash();
     }
 
-    std::size_t operator()(const VkDescriptorPool data) const
+    std::size_t operator()(const VkDescriptorPool& data) const
     {
-        std::size_t res = 17;
-        res = res * 31 + std::hash<uint64_t>()(uint64_t(data));
-        return res;
+        return std::hash<VkDescriptorPool>()(data);
     }
 };
 
 using DescriptorTextureData = std::unordered_map<TextureData, VkDescriptorSet, KeyHasher>;
 static std::unordered_map<VkDescriptorPool, DescriptorTextureData, KeyHasher> s_PoolTextures;
+#define EAGLE_CACHE_DESCRIPTORS 1
 
 void ImGui_ImplVulkan_NewFrame(VkDescriptorPool frameDescriptorPool)
 {
@@ -1142,6 +1149,7 @@ void ImGui_ImplVulkan_NewFrame(VkDescriptorPool frameDescriptorPool)
     auto& textures = s_PoolTextures[frameDescriptorPool]; // Add pool
     bd->VulkanInitInfo.PerFrameDescriptorPool = frameDescriptorPool;
 
+#if EAGLE_CACHE_DESCRIPTORS
     // Reset current frames descriptor sets
     for (auto it = textures.begin(); it != textures.end();)
     {
@@ -1157,7 +1165,9 @@ void ImGui_ImplVulkan_NewFrame(VkDescriptorPool frameDescriptorPool)
             it = textures.erase(it);
         }
     }
-    //vkResetDescriptorPool(bd->VulkanInitInfo.Device, frameDescriptorPool, 0);
+#else
+    vkResetDescriptorPool(bd->VulkanInitInfo.Device, frameDescriptorPool, 0);
+#endif
 }
 
 void ImGui_ImplVulkan_SetMinImageCount(uint32_t min_image_count)
@@ -1176,14 +1186,16 @@ void ImGui_ImplVulkan_SetMinImageCount(uint32_t min_image_count)
     bd->VulkanInitInfo.MinImageCount = min_image_count;
 }
 
-VkDescriptorSet ImGui_ImplVulkan_AddTexture(VkSampler sampler, VkImageView image_view, VkImageLayout image_layout)
+VkDescriptorSet ImGui_ImplVulkan_AddTexture(VkSampler sampler, VkImageView image_view, VkImageLayout image_layout, uint8_t revision)
 {
     ImGui_ImplVulkan_Data* bd = ImGui_ImplVulkan_GetBackendData();
     ImGui_ImplVulkan_InitInfo* v = &bd->VulkanInitInfo;
 
-    TextureData textureData{ sampler, image_view, image_layout };
+    TextureData textureData{ sampler, image_view, image_layout, revision };
 
     auto& pool = v->PerFrameDescriptorPool;
+
+#if EAGLE_CACHE_DESCRIPTORS
     // Get current pool's textures
     auto& textures = s_PoolTextures[pool];
 
@@ -1193,6 +1205,7 @@ VkDescriptorSet ImGui_ImplVulkan_AddTexture(VkSampler sampler, VkImageView image
         textureIt->first.bWasUsedLastFrame = true;
         return textureIt->second; // return existing descriptor set
     }
+#endif
 
     // Create Descriptor Set:
     VkDescriptorSet descriptor_set;
@@ -1221,7 +1234,9 @@ VkDescriptorSet ImGui_ImplVulkan_AddTexture(VkSampler sampler, VkImageView image
         vkUpdateDescriptorSets(v->Device, 1, write_desc, 0, nullptr);
     }
 
+#if EAGLE_CACHE_DESCRIPTORS
     textures[textureData] = descriptor_set;
+#endif
     return descriptor_set;
 }
 
