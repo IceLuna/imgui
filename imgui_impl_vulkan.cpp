@@ -1199,7 +1199,7 @@ VkDescriptorSet ImGui_ImplVulkan_AddTexture(VkSampler sampler, VkImageView image
     // Get current pool's textures
     auto& textures = s_PoolTextures[pool];
 
-    auto& textureIt = textures.find(textureData); // Find texture in the pool
+    auto textureIt = textures.find(textureData); // Find texture in the pool
     if (textureIt != textures.end())
     {
         textureIt->first.bWasUsedLastFrame = true;
