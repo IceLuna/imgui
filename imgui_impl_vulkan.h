@@ -75,6 +75,11 @@ IMGUI_IMPL_API void         ImGui_ImplVulkan_DestroyFontsTexture();
 IMGUI_IMPL_API void         ImGui_ImplVulkan_DestroyFontUploadObjects();
 IMGUI_IMPL_API void         ImGui_ImplVulkan_SetMinImageCount(uint32_t min_image_count); // To override MinImageCount after initialization (e.g. if swap chain is recreated)
 
+// EAGLE: Render/present a secondary viewport (platform window) with explicit draw data, for example a snapshot of viewport->DrawData,
+// so that it can be done on another thread instead of via ImGui::RenderPlatformWindowsDefault().
+IMGUI_IMPL_API void         ImGui_ImplVulkan_RenderViewport(ImGuiViewport* viewport, ImDrawData* draw_data, bool clear, ImVec2 size);
+IMGUI_IMPL_API void         ImGui_ImplVulkan_PresentViewport(ImGuiViewport* viewport);
+
 // Register a texture (VkDescriptorSet == ImTextureID)
 // FIXME: This is experimental in the sense that we are unsure how to best design/tackle this problem
 // Please post to https://github.com/ocornut/imgui/pull/914 if you have suggestions.

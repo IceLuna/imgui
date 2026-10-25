@@ -102,10 +102,12 @@ struct ImGui_ImplVulkanH_WindowRenderBuffers
 struct ImGui_ImplVulkan_ViewportData
 {
     bool                                    WindowOwned;
+    bool                                    SwapChainNeedRebuild; // EAGLE: Rebuilt at the start of the next ImGui_ImplVulkan_RenderViewport()
+    bool                                    FramePending;         // EAGLE: A frame was submitted by ImGui_ImplVulkan_RenderViewport() and needs to be presented
     ImGui_ImplVulkanH_Window                Window;             // Used by secondary viewports only
     ImGui_ImplVulkanH_WindowRenderBuffers   RenderBuffers;      // Used by all viewports
 
-    ImGui_ImplVulkan_ViewportData()         { WindowOwned = false; memset(&RenderBuffers, 0, sizeof(RenderBuffers)); }
+    ImGui_ImplVulkan_ViewportData()         { WindowOwned = false; SwapChainNeedRebuild = false; FramePending = false; memset(&RenderBuffers, 0, sizeof(RenderBuffers)); }
     ~ImGui_ImplVulkan_ViewportData()        { }
 };
 
@@ -1447,6 +1449,8 @@ void ImGui_ImplVulkanH_CreateWindowSwapChain(VkPhysicalDevice physical_device, V
     wd->Frames = nullptr;
     wd->FrameSemaphores = nullptr;
     wd->ImageCount = 0;
+    wd->FrameIndex = 0;     // EAGLE: The new swapchain can have a different image count, so don't keep indices into the old frames
+    wd->SemaphoreIndex = 0;
     if (wd->RenderPass)
         vkDestroyRenderPass(device, wd->RenderPass, allocator);
     if (wd->Pipeline)
@@ -1761,13 +1765,28 @@ static void ImGui_ImplVulkan_SetWindowSize(ImGuiViewport* viewport, ImVec2 size)
     ImGui_ImplVulkanH_CreateOrResizeWindow(v->Instance, v->PhysicalDevice, v->Device, &vd->Window, v->QueueFamily, v->Allocator, (int)size.x, (int)size.y, v->MinImageCount);
 }
 
-static void ImGui_ImplVulkan_RenderWindow(ImGuiViewport* viewport, void*)
+// EAGLE: Split out of ImGui_ImplVulkan_RenderWindow() so that it can be called with explicit draw data (a snapshot of viewport->DrawData)
+// from the render thread. It doesn't read anything from `viewport` except RendererUserData, so the main thread can keep using it meanwhile.
+// The swapchain is rebuilt here (when needed) using `size`, which is captured together with the draw data.
+void ImGui_ImplVulkan_RenderViewport(ImGuiViewport* viewport, ImDrawData* draw_data, bool clear, ImVec2 size)
 {
     ImGui_ImplVulkan_Data* bd = ImGui_ImplVulkan_GetBackendData();
     ImGui_ImplVulkan_ViewportData* vd = (ImGui_ImplVulkan_ViewportData*)viewport->RendererUserData;
+    if (vd == nullptr || !vd->WindowOwned)
+        return;
     ImGui_ImplVulkanH_Window* wd = &vd->Window;
     ImGui_ImplVulkan_InitInfo* v = &bd->VulkanInitInfo;
     VkResult err;
+
+    vd->FramePending = false;
+    if (vd->SwapChainNeedRebuild)
+    {
+        if (size.x <= 0.0f || size.y <= 0.0f)
+            return;
+        wd->ClearEnable = clear;
+        ImGui_ImplVulkanH_CreateOrResizeWindow(v->Instance, v->PhysicalDevice, v->Device, wd, v->QueueFamily, v->Allocator, (int)size.x, (int)size.y, v->MinImageCount);
+        vd->SwapChainNeedRebuild = false;
+    }
 
     ImGui_ImplVulkanH_Frame* fd = &wd->Frames[wd->FrameIndex];
     ImGui_ImplVulkanH_FrameSemaphores* fsd = &wd->FrameSemaphores[wd->SemaphoreIndex];
@@ -1781,7 +1800,15 @@ static void ImGui_ImplVulkan_RenderWindow(ImGuiViewport* viewport, void*)
         }
         {
             err = vkAcquireNextImageKHR(v->Device, wd->Swapchain, UINT64_MAX, fsd->ImageAcquiredSemaphore, VK_NULL_HANDLE, &wd->FrameIndex);
-            check_vk_result(err);
+            if (err == VK_ERROR_OUT_OF_DATE_KHR)
+            {
+                vd->SwapChainNeedRebuild = true;
+                return;
+            }
+            if (err == VK_SUBOPTIMAL_KHR)
+                vd->SwapChainNeedRebuild = true; // An image was acquired, so use it. Rebuild on the next frame
+            else
+                check_vk_result(err);
             fd = &wd->Frames[wd->FrameIndex];
         }
         {
@@ -1803,13 +1830,13 @@ static void ImGui_ImplVulkan_RenderWindow(ImGuiViewport* viewport, void*)
             info.framebuffer = fd->Framebuffer;
             info.renderArea.extent.width = wd->Width;
             info.renderArea.extent.height = wd->Height;
-            info.clearValueCount = (viewport->Flags & ImGuiViewportFlags_NoRendererClear) ? 0 : 1;
-            info.pClearValues = (viewport->Flags & ImGuiViewportFlags_NoRendererClear) ? nullptr : &wd->ClearValue;
+            info.clearValueCount = clear ? 1 : 0;
+            info.pClearValues = clear ? &wd->ClearValue : nullptr;
             vkCmdBeginRenderPass(fd->CommandBuffer, &info, VK_SUBPASS_CONTENTS_INLINE);
         }
     }
 
-    ImGui_ImplVulkan_RenderDrawData(viewport->DrawData, fd->CommandBuffer, wd->Pipeline);
+    ImGui_ImplVulkan_RenderDrawData(draw_data, fd->CommandBuffer, wd->Pipeline);
 
     {
         vkCmdEndRenderPass(fd->CommandBuffer);
@@ -1833,12 +1860,18 @@ static void ImGui_ImplVulkan_RenderWindow(ImGuiViewport* viewport, void*)
             check_vk_result(err);
         }
     }
+    vd->FramePending = true;
 }
 
-static void ImGui_ImplVulkan_SwapBuffers(ImGuiViewport* viewport, void*)
+// EAGLE: Split out of ImGui_ImplVulkan_SwapBuffers(), see ImGui_ImplVulkan_RenderViewport().
+// Presents the frame submitted by the last ImGui_ImplVulkan_RenderViewport() call
+void ImGui_ImplVulkan_PresentViewport(ImGuiViewport* viewport)
 {
     ImGui_ImplVulkan_Data* bd = ImGui_ImplVulkan_GetBackendData();
     ImGui_ImplVulkan_ViewportData* vd = (ImGui_ImplVulkan_ViewportData*)viewport->RendererUserData;
+    if (vd == nullptr || !vd->FramePending)
+        return;
+    vd->FramePending = false;
     ImGui_ImplVulkanH_Window* wd = &vd->Window;
     ImGui_ImplVulkan_InitInfo* v = &bd->VulkanInitInfo;
 
@@ -1855,12 +1888,22 @@ static void ImGui_ImplVulkan_SwapBuffers(ImGuiViewport* viewport, void*)
     info.pImageIndices = &present_index;
     err = vkQueuePresentKHR(v->Queue, &info);
     if (err == VK_ERROR_OUT_OF_DATE_KHR || err == VK_SUBOPTIMAL_KHR)
-        ImGui_ImplVulkanH_CreateOrResizeWindow(v->Instance, v->PhysicalDevice, v->Device, &vd->Window, v->QueueFamily, v->Allocator, (int)viewport->Size.x, (int)viewport->Size.y, v->MinImageCount);
+        vd->SwapChainNeedRebuild = true; // Rebuilt at the start of the next ImGui_ImplVulkan_RenderViewport()
     else
         check_vk_result(err);
 
     wd->FrameIndex = (wd->FrameIndex + 1) % wd->ImageCount;         // This is for the next vkWaitForFences()
     wd->SemaphoreIndex = (wd->SemaphoreIndex + 1) % wd->ImageCount; // Now we can use the next set of semaphores
+}
+
+static void ImGui_ImplVulkan_RenderWindow(ImGuiViewport* viewport, void*)
+{
+    ImGui_ImplVulkan_RenderViewport(viewport, viewport->DrawData, (viewport->Flags & ImGuiViewportFlags_NoRendererClear) == 0, viewport->Size);
+}
+
+static void ImGui_ImplVulkan_SwapBuffers(ImGuiViewport* viewport, void*)
+{
+    ImGui_ImplVulkan_PresentViewport(viewport);
 }
 
 void ImGui_ImplVulkan_InitPlatformInterface()
