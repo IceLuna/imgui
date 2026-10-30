@@ -104,10 +104,11 @@ struct ImGui_ImplVulkan_ViewportData
     bool                                    WindowOwned;
     bool                                    SwapChainNeedRebuild; // EAGLE: Rebuilt at the start of the next ImGui_ImplVulkan_RenderViewport()
     bool                                    FramePending;         // EAGLE: A frame was submitted by ImGui_ImplVulkan_RenderViewport() and needs to be presented
+    ImVec2                                  SwapChainSize;        // EAGLE: The size the swapchain was last created for. ImGui_ImplVulkan_RenderViewport() rebuilds it when it's given another size
     ImGui_ImplVulkanH_Window                Window;             // Used by secondary viewports only
     ImGui_ImplVulkanH_WindowRenderBuffers   RenderBuffers;      // Used by all viewports
 
-    ImGui_ImplVulkan_ViewportData()         { WindowOwned = false; SwapChainNeedRebuild = false; FramePending = false; memset(&RenderBuffers, 0, sizeof(RenderBuffers)); }
+    ImGui_ImplVulkan_ViewportData()         { WindowOwned = false; SwapChainNeedRebuild = false; FramePending = false; SwapChainSize = ImVec2(0.0f, 0.0f); memset(&RenderBuffers, 0, sizeof(RenderBuffers)); }
     ~ImGui_ImplVulkan_ViewportData()        { }
 };
 
@@ -1405,6 +1406,8 @@ void ImGui_ImplVulkanH_CreateWindowCommandBuffers(VkPhysicalDevice physical_devi
             err = vkCreateFence(device, &info, allocator, &fd->Fence);
             check_vk_result(err);
         }
+        // EAGLE: The semaphores are kept when the swapchain is rebuilt, see ImGui_ImplVulkanH_CreateWindowSwapChain()
+        if (fsd->ImageAcquiredSemaphore == VK_NULL_HANDLE)
         {
             VkSemaphoreCreateInfo info = {};
             info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
@@ -1434,19 +1437,38 @@ void ImGui_ImplVulkanH_CreateWindowSwapChain(VkPhysicalDevice physical_device, V
     VkResult err;
     VkSwapchainKHR old_swapchain = wd->Swapchain;
     wd->Swapchain = VK_NULL_HANDLE;
-    err = vkDeviceWaitIdle(device);
-    check_vk_result(err);
+
+    // EAGLE: Wait for this window's own frames instead of the whole device. They're the only users of the resources destroyed below.
+    // vkDeviceWaitIdle() would also wait for everything submitted after them (the rest of the app's current frame), and while the window is
+    // being resized, the swapchain is rebuilt every frame, so every frame would stall until the GPU is idle.
+    // Each frame's fence is either signaled or has a pending signal (it's only reset right before a submit), so waiting on all of them is fine
+    {
+        VkFence fences[16];
+        uint32_t fence_count = 0;
+        for (uint32_t i = 0; i < wd->ImageCount && fence_count < IM_ARRAYSIZE(fences); i++)
+            if (wd->Frames[i].Fence != VK_NULL_HANDLE)
+                fences[fence_count++] = wd->Frames[i].Fence;
+        if (fence_count > 0)
+        {
+            err = vkWaitForFences(device, fence_count, fences, VK_TRUE, UINT64_MAX);
+            check_vk_result(err);
+        }
+    }
 
     // We don't use ImGui_ImplVulkanH_DestroyWindow() because we want to preserve the old swapchain to create the new one.
     // Destroy old Framebuffer
     for (uint32_t i = 0; i < wd->ImageCount; i++)
     {
         ImGui_ImplVulkanH_DestroyFrame(device, &wd->Frames[i], allocator);
-        ImGui_ImplVulkanH_DestroyFrameSemaphores(device, &wd->FrameSemaphores[i], allocator);
     }
     IM_FREE(wd->Frames);
-    IM_FREE(wd->FrameSemaphores);
     wd->Frames = nullptr;
+
+    // EAGLE: The semaphores are kept, if the new swapchain has as many images (it nearly always does).
+    // The last frame's present might still be waiting on its semaphore (the fences above don't cover presents), so it can't be destroyed yet.
+    // Reusing it is fine though, that's what happens every frame anyway, once the semaphores wrap around
+    ImGui_ImplVulkanH_FrameSemaphores* old_frame_semaphores = wd->FrameSemaphores;
+    const uint32_t old_frame_semaphore_count = wd->ImageCount;
     wd->FrameSemaphores = nullptr;
     wd->ImageCount = 0;
     wd->FrameIndex = 0;     // EAGLE: The new swapchain can have a different image count, so don't keep indices into the old frames
@@ -1506,9 +1528,25 @@ void ImGui_ImplVulkanH_CreateWindowSwapChain(VkPhysicalDevice physical_device, V
 
         IM_ASSERT(wd->Frames == nullptr);
         wd->Frames = (ImGui_ImplVulkanH_Frame*)IM_ALLOC(sizeof(ImGui_ImplVulkanH_Frame) * wd->ImageCount);
-        wd->FrameSemaphores = (ImGui_ImplVulkanH_FrameSemaphores*)IM_ALLOC(sizeof(ImGui_ImplVulkanH_FrameSemaphores) * wd->ImageCount);
         memset(wd->Frames, 0, sizeof(wd->Frames[0]) * wd->ImageCount);
-        memset(wd->FrameSemaphores, 0, sizeof(wd->FrameSemaphores[0]) * wd->ImageCount);
+        if (old_frame_semaphores != nullptr && old_frame_semaphore_count == wd->ImageCount)
+        {
+            wd->FrameSemaphores = old_frame_semaphores; // EAGLE: See above
+        }
+        else
+        {
+            if (old_frame_semaphores != nullptr)
+            {
+                // EAGLE: The image count changed, which is rare. Wait until nothing uses the old semaphores, including the presents
+                err = vkDeviceWaitIdle(device);
+                check_vk_result(err);
+                for (uint32_t i = 0; i < old_frame_semaphore_count; i++)
+                    ImGui_ImplVulkanH_DestroyFrameSemaphores(device, &old_frame_semaphores[i], allocator);
+                IM_FREE(old_frame_semaphores);
+            }
+            wd->FrameSemaphores = (ImGui_ImplVulkanH_FrameSemaphores*)IM_ALLOC(sizeof(ImGui_ImplVulkanH_FrameSemaphores) * wd->ImageCount);
+            memset(wd->FrameSemaphores, 0, sizeof(wd->FrameSemaphores[0]) * wd->ImageCount);
+        }
         for (uint32_t i = 0; i < wd->ImageCount; i++)
             wd->Frames[i].Backbuffer = backbuffers[i];
     }
@@ -1736,6 +1774,7 @@ static void ImGui_ImplVulkan_CreateWindow(ImGuiViewport* viewport)
     // Create SwapChain, RenderPass, Framebuffer, etc.
     wd->ClearEnable = (viewport->Flags & ImGuiViewportFlags_NoRendererClear) ? false : true;
     ImGui_ImplVulkanH_CreateOrResizeWindow(v->Instance, v->PhysicalDevice, v->Device, wd, v->QueueFamily, v->Allocator, (int)viewport->Size.x, (int)viewport->Size.y, v->MinImageCount);
+    vd->SwapChainSize = viewport->Size;
     vd->WindowOwned = true;
 }
 
@@ -1763,11 +1802,14 @@ static void ImGui_ImplVulkan_SetWindowSize(ImGuiViewport* viewport, ImVec2 size)
     ImGui_ImplVulkan_InitInfo* v = &bd->VulkanInitInfo;
     vd->Window.ClearEnable = (viewport->Flags & ImGuiViewportFlags_NoRendererClear) ? false : true;
     ImGui_ImplVulkanH_CreateOrResizeWindow(v->Instance, v->PhysicalDevice, v->Device, &vd->Window, v->QueueFamily, v->Allocator, (int)size.x, (int)size.y, v->MinImageCount);
+    vd->SwapChainSize = size;
 }
 
 // EAGLE: Split out of ImGui_ImplVulkan_RenderWindow() so that it can be called with explicit draw data (a snapshot of viewport->DrawData)
 // from the render thread. It doesn't read anything from `viewport` except RendererUserData, so the main thread can keep using it meanwhile.
 // The swapchain is rebuilt here (when needed) using `size`, which is captured together with the draw data.
+// It's also rebuilt when `size` differs from the swapchain's size, so the renderer's Renderer_SetWindowSize() callback can do nothing:
+// then the swapchain is resized right when the first frame laid out for the new size is rendered, instead of under the frames that are still in flight.
 void ImGui_ImplVulkan_RenderViewport(ImGuiViewport* viewport, ImDrawData* draw_data, bool clear, ImVec2 size)
 {
     ImGui_ImplVulkan_Data* bd = ImGui_ImplVulkan_GetBackendData();
@@ -1779,12 +1821,13 @@ void ImGui_ImplVulkan_RenderViewport(ImGuiViewport* viewport, ImDrawData* draw_d
     VkResult err;
 
     vd->FramePending = false;
-    if (vd->SwapChainNeedRebuild)
+    if (vd->SwapChainNeedRebuild || size.x != vd->SwapChainSize.x || size.y != vd->SwapChainSize.y)
     {
         if (size.x <= 0.0f || size.y <= 0.0f)
             return;
         wd->ClearEnable = clear;
         ImGui_ImplVulkanH_CreateOrResizeWindow(v->Instance, v->PhysicalDevice, v->Device, wd, v->QueueFamily, v->Allocator, (int)size.x, (int)size.y, v->MinImageCount);
+        vd->SwapChainSize = size;
         vd->SwapChainNeedRebuild = false;
     }
 
