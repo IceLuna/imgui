@@ -136,6 +136,13 @@ struct ImGui_ImplVulkanH_FrameSemaphores
     VkSemaphore         RenderCompleteSemaphore;
 };
 
+// EAGLE: A swapchain that was replaced when the window's swapchain was rebuilt. See ImGui_ImplVulkanH_Window::RetiredSwapchains
+struct ImGui_ImplVulkanH_RetiredSwapchain
+{
+    VkSwapchainKHR      Swapchain;
+    VkFence             Fence; // Fence of the first submit made after the swapchain was retired. VK_NULL_HANDLE until then
+};
+
 // Helper structure to hold the data needed by one rendering context into one OS window
 // (Used by example's main.cpp. Used by multi-viewport features. Probably NOT used by your own engine/app.)
 struct ImGui_ImplVulkanH_Window
@@ -155,6 +162,7 @@ struct ImGui_ImplVulkanH_Window
     uint32_t            SemaphoreIndex;         // Current set of swapchain wait semaphores we're using (needs to be distinct from per frame data)
     ImGui_ImplVulkanH_Frame*            Frames;
     ImGui_ImplVulkanH_FrameSemaphores*  FrameSemaphores;
+    ImVector<ImGui_ImplVulkanH_RetiredSwapchain> RetiredSwapchains; // EAGLE: Destroyed once nothing uses them anymore, see ImGui_ImplVulkanH_CreateWindowSwapChain()
 
     ImGui_ImplVulkanH_Window()
     {

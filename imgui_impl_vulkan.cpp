@@ -215,6 +215,7 @@ static bool g_FunctionsLoaded = true;
     IMGUI_VULKAN_FUNC_MAP_MACRO(vkFreeDescriptorSets) \
     IMGUI_VULKAN_FUNC_MAP_MACRO(vkFreeMemory) \
     IMGUI_VULKAN_FUNC_MAP_MACRO(vkGetBufferMemoryRequirements) \
+    IMGUI_VULKAN_FUNC_MAP_MACRO(vkGetFenceStatus) \
     IMGUI_VULKAN_FUNC_MAP_MACRO(vkGetImageMemoryRequirements) \
     IMGUI_VULKAN_FUNC_MAP_MACRO(vkGetPhysicalDeviceMemoryProperties) \
     IMGUI_VULKAN_FUNC_MAP_MACRO(vkGetPhysicalDeviceSurfaceCapabilitiesKHR) \
@@ -1431,6 +1432,28 @@ int ImGui_ImplVulkanH_GetMinImageCountFromPresentMode(VkPresentModeKHR present_m
     return 1;
 }
 
+// EAGLE: Destroys the retired swapchains that are no longer used.
+// A swapchain can't be destroyed while a present to it is still pending on the queue. The frame fences don't cover presents,
+// since they're signaled by the submits made before them. So a retired swapchain is destroyed once the fence of a submit
+// made after it was retired (which comes after its last present on the queue) has signaled.
+// If that fence has been reset and resubmitted meanwhile, it's simply waited for again
+static void ImGui_ImplVulkanH_DestroyRetiredSwapchains(VkDevice device, ImGui_ImplVulkanH_Window* wd, const VkAllocationCallbacks* allocator, bool fences_signaled)
+{
+    for (int i = 0; i < wd->RetiredSwapchains.Size;)
+    {
+        const ImGui_ImplVulkanH_RetiredSwapchain& retired = wd->RetiredSwapchains[i];
+        if (retired.Fence != VK_NULL_HANDLE && (fences_signaled || vkGetFenceStatus(device, retired.Fence) == VK_SUCCESS))
+        {
+            vkDestroySwapchainKHR(device, retired.Swapchain, allocator);
+            wd->RetiredSwapchains.erase(wd->RetiredSwapchains.Data + i);
+        }
+        else
+        {
+            i++;
+        }
+    }
+}
+
 // Also destroy old swap chain and in-flight frames data, if any.
 void ImGui_ImplVulkanH_CreateWindowSwapChain(VkPhysicalDevice physical_device, VkDevice device, ImGui_ImplVulkanH_Window* wd, const VkAllocationCallbacks* allocator, int w, int h, uint32_t min_image_count)
 {
@@ -1454,6 +1477,9 @@ void ImGui_ImplVulkanH_CreateWindowSwapChain(VkPhysicalDevice physical_device, V
             check_vk_result(err);
         }
     }
+
+    // EAGLE: The fences of the retired swapchains are among the ones waited for above (and they're about to be destroyed)
+    ImGui_ImplVulkanH_DestroyRetiredSwapchains(device, wd, allocator, true);
 
     // We don't use ImGui_ImplVulkanH_DestroyWindow() because we want to preserve the old swapchain to create the new one.
     // Destroy old Framebuffer
@@ -1550,8 +1576,15 @@ void ImGui_ImplVulkanH_CreateWindowSwapChain(VkPhysicalDevice physical_device, V
         for (uint32_t i = 0; i < wd->ImageCount; i++)
             wd->Frames[i].Backbuffer = backbuffers[i];
     }
+
+    // EAGLE: Not destroyed right away, the last present to it might still be pending. See ImGui_ImplVulkanH_DestroyRetiredSwapchains()
     if (old_swapchain)
-        vkDestroySwapchainKHR(device, old_swapchain, allocator);
+    {
+        ImGui_ImplVulkanH_RetiredSwapchain retired;
+        retired.Swapchain = old_swapchain;
+        retired.Fence = VK_NULL_HANDLE;
+        wd->RetiredSwapchains.push_back(retired);
+    }
 
     // Create the Render Pass
     {
@@ -1678,6 +1711,9 @@ void ImGui_ImplVulkanH_DestroyWindow(VkInstance instance, VkDevice device, ImGui
     wd->FrameSemaphores = nullptr;
     vkDestroyPipeline(device, wd->Pipeline, allocator);
     vkDestroyRenderPass(device, wd->RenderPass, allocator);
+    for (const ImGui_ImplVulkanH_RetiredSwapchain& retired : wd->RetiredSwapchains) // EAGLE: The device is idle
+        vkDestroySwapchainKHR(device, retired.Swapchain, allocator);
+    wd->RetiredSwapchains.clear();
     vkDestroySwapchainKHR(device, wd->Swapchain, allocator);
     vkDestroySurfaceKHR(instance, wd->Surface, allocator);
 
@@ -1821,6 +1857,7 @@ void ImGui_ImplVulkan_RenderViewport(ImGuiViewport* viewport, ImDrawData* draw_d
     VkResult err;
 
     vd->FramePending = false;
+    ImGui_ImplVulkanH_DestroyRetiredSwapchains(v->Device, wd, v->Allocator, false);
     if (vd->SwapChainNeedRebuild || size.x != vd->SwapChainSize.x || size.y != vd->SwapChainSize.y)
     {
         if (size.x <= 0.0f || size.y <= 0.0f)
@@ -1831,16 +1868,9 @@ void ImGui_ImplVulkan_RenderViewport(ImGuiViewport* viewport, ImDrawData* draw_d
         vd->SwapChainNeedRebuild = false;
     }
 
-    ImGui_ImplVulkanH_Frame* fd = &wd->Frames[wd->FrameIndex];
+    ImGui_ImplVulkanH_Frame* fd = nullptr;
     ImGui_ImplVulkanH_FrameSemaphores* fsd = &wd->FrameSemaphores[wd->SemaphoreIndex];
     {
-        for (;;)
-        {
-            err = vkWaitForFences(v->Device, 1, &fd->Fence, VK_TRUE, 100);
-            if (err == VK_SUCCESS) break;
-            if (err == VK_TIMEOUT) continue;
-            check_vk_result(err);
-        }
         {
             err = vkAcquireNextImageKHR(v->Device, wd->Swapchain, UINT64_MAX, fsd->ImageAcquiredSemaphore, VK_NULL_HANDLE, &wd->FrameIndex);
             if (err == VK_ERROR_OUT_OF_DATE_KHR)
@@ -1853,6 +1883,15 @@ void ImGui_ImplVulkan_RenderViewport(ImGuiViewport* viewport, ImDrawData* draw_d
             else
                 check_vk_result(err);
             fd = &wd->Frames[wd->FrameIndex];
+        }
+        // EAGLE: Wait for the frame of the image that was actually acquired, since its fence is reset below.
+        // Images aren't necessarily acquired in order (for example, with the mailbox present mode), so it's not always the expected one
+        for (;;)
+        {
+            err = vkWaitForFences(v->Device, 1, &fd->Fence, VK_TRUE, 100);
+            if (err == VK_SUCCESS) break;
+            if (err == VK_TIMEOUT) continue;
+            check_vk_result(err);
         }
         {
             err = vkResetCommandPool(v->Device, fd->CommandPool, 0);
@@ -1901,6 +1940,11 @@ void ImGui_ImplVulkan_RenderViewport(ImGuiViewport* viewport, ImDrawData* draw_d
             check_vk_result(err);
             err = vkQueueSubmit(v->Queue, 1, &info, fd->Fence);
             check_vk_result(err);
+
+            // EAGLE: This submit comes after the last presents to the retired swapchains
+            for (ImGui_ImplVulkanH_RetiredSwapchain& retired : wd->RetiredSwapchains)
+                if (retired.Fence == VK_NULL_HANDLE)
+                    retired.Fence = fd->Fence;
         }
     }
     vd->FramePending = true;
